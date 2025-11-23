@@ -5,7 +5,7 @@ const STORAGE_KEY = 'floeshield_intents';
 // Helper to convert BigInt to string for storage
 const serializeBigInt = (obj: any): any => {
   return JSON.parse(
-    JSON.stringify(obj, (key, value) =>
+    JSON.stringify(obj, (_, value) =>
       typeof value === 'bigint' ? value.toString() : value
     )
   );
