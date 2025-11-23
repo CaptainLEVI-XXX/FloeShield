@@ -29,7 +29,7 @@ function App() {
       <div className="main-content">
         <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-            <a href="https://github.com/yourusername/floeshield" target="_blank" rel="noopener noreferrer" 
+            <a href="https://github.com/CaptainLEVI-XXX/FloeShield" target="_blank" rel="noopener noreferrer" 
                style={{ color: 'var(--text-secondary)', transition: 'color 0.3s' }}
                onMouseEnter={(e) => e.currentTarget.style.color = 'var(--accent-primary)'}
                onMouseLeave={(e) => e.currentTarget.style.color = 'var(--text-secondary)'}>
