@@ -18,7 +18,7 @@ contract FloeShieldRegistry is IFloeShieldRegistry {
     uint256 public constant PROTOCOL_MAX_RATE = 2000;
 
     modifier intentExists(bytes32 intentId) {
-        if (intents[intentId].user == 0) IntentNotFound.selector.revertWith(intentId);
+        if (intents[intentId].user == bytes32(0)) IntentNotFound.selector.revertWith(intentId);
         _;
     }
 
@@ -36,36 +36,32 @@ contract FloeShieldRegistry is IFloeShieldRegistry {
     ) external returns (bytes32 intentId) {
         Lock.unlock();
 
-
-        uint256 minLtv = bounds.minLtvBps;
-        uint256 maxLtv = bounds.maxLtvBps;
-        uint256 maxRate = bounds.maxRateBps;
-
-
-        if (expiry <= block.timestamp) ExpiryInPast.selector.revertWith(expiry);
+        // Validate expiry (use < instead of <= to allow same-block registration)
+        if (expiry < block.timestamp) ExpiryInPast.selector.revertWith(expiry);
         
-        // Cache array length
+        // Cache and validate collateral array
         uint256 collateralLength = bounds.acceptedCollateral.length;
         if (collateralLength == 0) NoCollateralSpecified.selector.revertWith();
         if (collateralLength > 10) TooManyCollateralTypes.selector.revertWith(collateralLength);
 
-        if (minLtv < PROTOCOL_MIN_LTV) MinLtvTooLow.selector.revertWith(minLtv);
-        if (maxLtv > PROTOCOL_MAX_LTV) MaxLtvTooHigh.selector.revertWith(maxLtv);
-        if (minLtv > maxLtv) InvalidLtvRange.selector.revertWith(minLtv, maxLtv);
-        if (maxRate > PROTOCOL_MAX_RATE) MaxRateTooHigh.selector.revertWith(maxRate);
+        // Validate LTV and rate bounds
+        if (bounds.minLtvBps < PROTOCOL_MIN_LTV) MinLtvTooLow.selector.revertWith(bounds.minLtvBps);
+        if (bounds.maxLtvBps > PROTOCOL_MAX_LTV) MaxLtvTooHigh.selector.revertWith(bounds.maxLtvBps);
+        if (bounds.minLtvBps > bounds.maxLtvBps) InvalidLtvRange.selector.revertWith(bounds.minLtvBps, bounds.maxLtvBps);
+        if (bounds.maxRateBps > PROTOCOL_MAX_RATE) MaxRateTooHigh.selector.revertWith(bounds.maxRateBps);
 
         bytes32 hashedUser = keccak256(abi.encodePacked(msg.sender));
         uint256 timestamp = block.timestamp;
         intentId = keccak256(abi.encodePacked(hashedUser, commitment, nonce, timestamp));
 
-        if (intents[intentId].user != 0) IntentIdCollision.selector.revertWith(intentId);
+        if (intents[intentId].user != bytes32(0)) IntentIdCollision.selector.revertWith(intentId);
 
         intents[intentId] = ShieldedIntent({
             user: hashedUser,
             commitment: commitment,
-            minLtvBps: minLtv,
-            maxLtvBps: maxLtv,
-            maxRateBps: maxRate,
+            minLtvBps: bounds.minLtvBps,
+            maxLtvBps: bounds.maxLtvBps,
+            maxRateBps: bounds.maxRateBps,
             acceptedCollateral: bounds.acceptedCollateral,
             expiry: expiry,
             createdAt: timestamp,
@@ -77,9 +73,9 @@ contract FloeShieldRegistry is IFloeShieldRegistry {
         userIntents[hashedUser].push(intentId);
         allIntents.push(intentId);
 
-        Lock.lock();
-
         emit IntentRegistered(intentId, hashedUser, commitment, expiry);
+
+        Lock.lock();
     }
 
     function revealIntent(bytes32 intentId, RevealedIntent calldata revealed)
@@ -89,16 +85,14 @@ contract FloeShieldRegistry is IFloeShieldRegistry {
     {
         Lock.unlock();
         
+        // Load entire struct into memory once to minimize storage reads
+        ShieldedIntent memory intentData = intents[intentId];
 
-        ShieldedIntent storage intent = intents[intentId];
+        if (!intentData.active) IntentNotActive.selector.revertWith(intentId);
+        if (intentData.revealed) IntentAlreadyRevealed.selector.revertWith(intentId);
+        if (block.timestamp >= intentData.expiry) IntentExpired.selector.revertWith(intentId);
 
-        if (!intent.active) IntentNotActive.selector.revertWith(intentId);
-        if (intent.revealed) IntentAlreadyRevealed.selector.revertWith(intentId);
-        if (block.timestamp >= intent.expiry) IntentExpired.selector.revertWith(intentId);
-
-        // Cache commitment
-        bytes32 storedCommitment = intent.commitment;
-        
+        // Verify commitment
         bytes32 computedCommitment = keccak256(
             abi.encodePacked(
                 revealed.exactAmount,
@@ -110,26 +104,22 @@ contract FloeShieldRegistry is IFloeShieldRegistry {
             )
         );
 
-        if (computedCommitment != storedCommitment) InvalidReveal.selector.revertWith(intentId);
+        if (computedCommitment != intentData.commitment) InvalidReveal.selector.revertWith(intentId);
 
-
-        uint256 minLtv = intent.minLtvBps;
-        uint256 maxLtv = intent.maxLtvBps;
-        uint256 maxRate = intent.maxRateBps;
-
-        if (revealed.exactLtvBps < minLtv || revealed.exactLtvBps > maxLtv) {
+        // Validate revealed values against bounds
+        if (revealed.exactLtvBps < intentData.minLtvBps || revealed.exactLtvBps > intentData.maxLtvBps) {
             LtvOutOfBounds.selector.revertWith(intentId);
         }
 
-        if (revealed.exactRateBps > maxRate) RateOutOfBounds.selector.revertWith(intentId);
+        if (revealed.exactRateBps > intentData.maxRateBps) RateOutOfBounds.selector.revertWith(intentId);
 
-
-        address[] memory acceptedCollateral = intent.acceptedCollateral;
+        // Verify collateral is in accepted list
+        address[] memory acceptedCollateral = intentData.acceptedCollateral;
         uint256 length = acceptedCollateral.length;
-        bool collateralAccepted = false;
+        bool collateralAccepted;
         
         unchecked {
-            for (uint256 i = 0; i < length; ++i) {
+            for (uint256 i; i < length; ++i) {
                 if (acceptedCollateral[i] == revealed.preferredCollateral) {
                     collateralAccepted = true;
                     break;
@@ -139,12 +129,13 @@ contract FloeShieldRegistry is IFloeShieldRegistry {
         
         if (!collateralAccepted) CollateralNotAccepted.selector.revertWith(intentId);
 
+        // Write to storage
         revealedIntents[intentId] = revealed;
-        intent.revealed = true;
+        intents[intentId].revealed = true;
 
         emit IntentRevealed(
             intentId,
-            intent.user,
+            intentData.user,
             revealed.exactAmount,
             revealed.exactLtvBps,
             revealed.exactRateBps
@@ -165,9 +156,9 @@ contract FloeShieldRegistry is IFloeShieldRegistry {
 
         intent.active = false;
         
-        Lock.lock();
-
         emit IntentRevoked(intentId, intent.user);
+
+        Lock.lock();
     }
 
     function getCompatibleIntents(bytes32 intentId)
@@ -176,29 +167,26 @@ contract FloeShieldRegistry is IFloeShieldRegistry {
         intentExists(intentId)
         returns (bytes32[] memory compatibleIds)
     {
-
         ShieldedIntent memory intent = intents[intentId];
         
-
         uint256 allIntentsLength = allIntents.length;
         uint256 currentTime = block.timestamp;
         
         bytes32[] memory tempIds = new bytes32[](allIntentsLength);
-        uint256 count = 0;
-
+        uint256 count;
 
         unchecked {
-            for (uint256 i = 0; i < allIntentsLength; ++i) {
+            for (uint256 i; i < allIntentsLength; ++i) {
                 bytes32 otherId = allIntents[i];
                 if (otherId == intentId) continue;
 
-                // Load into memory for multiple field access
-                ShieldedIntent memory other = intents[otherId];
+                ShieldedIntent storage otherStorage = intents[otherId];
                 
-                // Short-circuit evaluation - cheapest checks first
-                if (!other.active) continue;
-                if (other.expiry < currentTime) continue;
-                if (other.user == intent.user) continue;
+                if (!otherStorage.active) continue;
+                if (otherStorage.expiry < currentTime) continue;
+                if (otherStorage.user == intent.user) continue;
+
+                ShieldedIntent memory other = otherStorage;
 
                 if (_boundsOverlap(intent, other)) {
                     tempIds[count] = otherId;
@@ -207,10 +195,9 @@ contract FloeShieldRegistry is IFloeShieldRegistry {
             }
         }
 
-        // Only allocate final array size needed
         compatibleIds = new bytes32[](count);
         unchecked {
-            for (uint256 i = 0; i < count; ++i) {
+            for (uint256 i; i < count; ++i) {
                 compatibleIds[i] = tempIds[i];
             }
         }
@@ -240,28 +227,48 @@ contract FloeShieldRegistry is IFloeShieldRegistry {
         return userIntents[hashedUser];
     }
 
+    function getTotalIntentsCount() external view returns (uint256) {
+        return allIntents.length;
+    }
+
+    function getIntentsPaginated(uint256 offset, uint256 limit) 
+        external 
+        view 
+        returns (bytes32[] memory intentIds) 
+    {
+        uint256 total = allIntents.length;
+        if (offset >= total) {
+            return new bytes32[](0);
+        }
+        
+        uint256 remaining = total - offset;
+        uint256 size = remaining < limit ? remaining : limit;
+        
+        intentIds = new bytes32[](size);
+        unchecked {
+            for (uint256 i; i < size; ++i) {
+                intentIds[i] = allIntents[offset + i];
+            }
+        }
+    }
+
     function _boundsOverlap(ShieldedIntent memory a, ShieldedIntent memory b) 
         private 
         pure 
         returns (bool) 
     {
-
+        // LTV ranges must overlap
         if (a.maxLtvBps < b.minLtvBps || b.maxLtvBps < a.minLtvBps) {
             return false;
         }
-
-        if (a.maxRateBps < b.maxRateBps) {
-            return false;
-        }
-
 
         uint256 aLength = a.acceptedCollateral.length;
         uint256 bLength = b.acceptedCollateral.length;
         
         unchecked {
-            for (uint256 i = 0; i < aLength; ++i) {
+            for (uint256 i; i < aLength; ++i) {
                 address collateralA = a.acceptedCollateral[i];
-                for (uint256 j = 0; j < bLength; ++j) {
+                for (uint256 j; j < bLength; ++j) {
                     if (collateralA == b.acceptedCollateral[j]) {
                         return true;
                     }
