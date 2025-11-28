@@ -15,7 +15,7 @@ contract FloeShieldRegistryTest is Test {
 
     function setUp() public {
         registry = new FloeShieldRegistry();
-        collateral[0] = address(0xABC); // Mock collateral address
+        collateral[0] = address(0xABC);
     }
 
     function test_RegisterShieldedIntent_InvalidBounds() public {
